@@ -25,6 +25,33 @@ export function mimeFor(path: string): string {
   return 'application/octet-stream';
 }
 
+/** Packaging (GitHub/GameBanana ZIPs) often nests the whole mod under one
+ * top-level folder. If EVERY file shares a single root folder, drop it so
+ * Psych Engine detection sees data/, songs/, weeks/, ... at the top level.
+ * Known Psych roots are never stripped (a charts-only ZIP stays intact). */
+const KNOWN_ROOTS = new Set(['data', 'songs', 'song', 'music', 'characters', 'character', 'stages', 'stage', 'weeks', 'week', 'images', 'sounds', 'assets', 'mods', 'dialogue', 'dialog']);
+
+export function stripCommonRoot<T extends { path: string }>(entries: T[]): T[] {
+  if (entries.length === 0) return entries;
+  const roots = new Set(entries.map(e => {
+    const i = e.path.indexOf('/');
+    return i > 0 ? e.path.slice(0, i) : '';
+  }));
+  if (roots.size !== 1) return entries;
+  const [root] = [...roots];
+  if (!root || KNOWN_ROOTS.has(root.toLowerCase())) return entries;
+  return entries.map(e => ({ ...e, path: e.path.slice(root.length + 1) }));
+}
+
+export function commonRootOf(paths: string[]): string | null {
+  if (paths.length === 0) return null;
+  const first = paths[0].indexOf('/');
+  if (first <= 0) return null;
+  const root = paths[0].slice(0, first);
+  if (!root || KNOWN_ROOTS.has(root.toLowerCase())) return null;
+  return paths.every(p => p === root || p.startsWith(root + '/')) ? root : null;
+}
+
 export async function filesFromZip(data: ArrayBuffer): Promise<Record<string, ProjectFile>> {
   const zip = await JSZip.loadAsync(data);
   const out: Record<string, ProjectFile> = {};
@@ -45,7 +72,10 @@ export async function filesFromZip(data: ArrayBuffer): Promise<Record<string, Pr
     })());
   });
   await Promise.all(jobs);
-  return out;
+  const stripped = stripCommonRoot(Object.values(out));
+  const fixed: Record<string, ProjectFile> = {};
+  for (const f of stripped) fixed[f.path] = f;
+  return fixed;
 }
 
 export async function filesFromFileList(list: FileList | File[]): Promise<Record<string, ProjectFile>> {
@@ -63,7 +93,10 @@ export async function filesFromFileList(list: FileList | File[]): Promise<Record
       out[clean] = { path: clean, kind: 'binary', data: buf, size: f.size, updatedAt: Date.now(), mime: f.type || mimeFor(clean) };
     }
   }));
-  return out;
+  const stripped = stripCommonRoot(Object.values(out));
+  const fixed: Record<string, ProjectFile> = {};
+  for (const f of stripped) fixed[f.path] = f;
+  return fixed;
 }
 
 export async function zipFromFiles(files: Record<string, ProjectFile>, rootFolder: string): Promise<Blob> {

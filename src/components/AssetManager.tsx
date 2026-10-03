@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react';
 import { useStore } from '../store/ProjectContext';
+import { commonRootOf } from '../psych/importExport';
 import { downloadBlob, baseOf, isAudioPath, isImagePath, extOf } from '../utils/helpers';
 
 export default function AssetManager() {
@@ -20,10 +21,23 @@ export default function AssetManager() {
 
   const pv = preview ? project.files[preview] : undefined;
   const pvUrl = preview ? fileUrl(preview) : null;
+  const nestedRoot = useMemo(() => commonRootOf(Object.keys(project.files)), [project.files]);
 
   return (
     <div>
       <h1 style={{ marginTop: 0 }}>Asset Manager <span className="tag">{paths.length} files</span></h1>
+      {nestedRoot && (
+        <div className="panel" style={{ borderColor: 'var(--warn)' }}>
+          <b>⚠ Everything is nested inside “{nestedRoot}/”.</b>
+          <p className="mut" style={{ margin: '4px 0 8px' }}>Song/chart/week detection needs Psych Engine folders at the top level. Strip the wrapper folder to fix detection and audio playback.</p>
+          <button className="btn small primary" onClick={() => {
+            for (const p of Object.keys(project.files)) {
+              if (p.startsWith(nestedRoot + '/')) renamePath(p, p.slice(nestedRoot.length + 1));
+            }
+            toast(`Stripped “${nestedRoot}/” — structure fixed.`, 'ok');
+          }}>🔧 Strip “{nestedRoot}/” & fix structure</button>
+        </div>
+      )}
       <div className="panel">
         <div className="row">
           <input value={q} onChange={e => setQ(e.target.value)} placeholder="Filter files…" style={{ background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 7, padding: '7px 9px', minWidth: 220 }} />
