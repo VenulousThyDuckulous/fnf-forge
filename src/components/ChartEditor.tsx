@@ -154,14 +154,41 @@ export default function ChartEditor({ standalone }: { standalone?: boolean }) {
   }
 
   // playback: scrolling playhead through chart length, synced to song audio clock
+  const [follow, setFollow] = useState(true);
+  const secRef = useRef(sec);
+  secRef.current = sec;
+  const followRef = useRef(follow);
+  followRef.current = follow;
+  const ppmRef = useRef(0.25);
+  ppmRef.current = pxPerMs;
   useEffect(() => {
     if (!playing) { if (playTimer.current) window.clearInterval(playTimer.current); playTimer.current = null; return; }
     const t0 = Date.now() - playhead;
     playTimer.current = window.setInterval(() => {
       const t = audioEngine.playing ? audioEngine.positionMs() : Date.now() - t0;
       setPlayhead(t);
+      // auto-advance the visible section so it follows the playhead
+      if (followRef.current) {
+        let acc = 0;
+        for (let i = 0; i < chart.sections.length; i++) {
+          const s = chart.sections[i];
+          const bpm = s.changeBPM && s.bpm ? s.bpm : chart.bpm;
+          acc += s.lengthInSteps * stepLengthMs(bpm);
+          if (t < acc) {
+            if (i !== secRef.current) {
+              secRef.current = i;
+              setSec(i);
+              setCursorMs(Math.round(t));
+              const start = acc - s.lengthInSteps * stepLengthMs(bpm);
+              const el = scrollRef.current;
+              if (el) el.scrollTop = Math.max(0, (t - start) * ppmRef.current - 80);
+            }
+            break;
+          }
+        }
+      }
       const len = chartLengthMs(chart);
-      if (t > len + 2000) { setPlaying(false); setPlayhead(0); audioEngine.stop(); }
+      if (t > len + 2000) { setPlaying(false); setPlayhead(0); setSec(0); audioEngine.stop(); }
     }, 50);
     return () => { if (playTimer.current) window.clearInterval(playTimer.current); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -293,6 +320,7 @@ export default function ChartEditor({ standalone }: { standalone?: boolean }) {
         <button className="btn small" onClick={() => { localRedo(); redo(); }} title="Ctrl+Y">↪</button>
         <button className="btn small" onClick={() => void togglePlay()}>{playing ? '⏸ Pause (Space)' : '▶ Play (Space)'}</button>
         <label className="pill"><input type="checkbox" checked={metro} onChange={e => setMetro(e.target.checked)} /> Metronome</label>
+        <label className="pill" title="Automatically turn to the section the playhead is in while playing"><input type="checkbox" checked={follow} onChange={e => setFollow(e.target.checked)} /> Follow</label>
         <label className="pill">Snap
           <select value={snap} onChange={e => setSnap(Number(e.target.value))} style={{ background: 'transparent', border: 0 }}>
             {[1, 2, 4, 8, 12, 16].map(s => <option key={s} value={s}>{s}</option>)}
