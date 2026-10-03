@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useStore } from '../store/ProjectContext';
-import type { PsychChart, PsychNote } from '../types';
+import type { PsychChart, PsychNote, SongEntry } from '../types';
 import { parsePsychChart, serializePsychChart, emptyChart, sectionStartMs, stepLengthMs, chartLengthMs } from '../psych/chart';
 import { discoverSongs } from '../psych/importExport';
 import { downloadBlob, formatTime, clamp } from '../utils/helpers';
@@ -12,7 +12,7 @@ const LANE_KEYS: Record<string, number> = { d: 0, f: 1, j: 2, k: 3, arrowleft: 0
 
 export default function ChartEditor({ standalone }: { standalone?: boolean }) {
   void standalone;
-  const { project, upsertText, currentFile, setCurrentFile, toast, undo, redo, settings } = useStore();
+  const { project, upsertText, currentFile, setCurrentFile, toast, undo, redo, settings, fileUrl } = useStore();
   const songs = useMemo(() => discoverSongs(project.files), [project.files]);
   const chartFiles = useMemo(() => Object.keys(project.files).filter(p => p.endsWith('.json') && (/data\//i.test(p) || /songs?\//i.test(p))).sort(), [project.files]);
   const [file, setFile] = useState<string | null>(currentFile ?? chartFiles[0] ?? songs[0]?.chartPaths[0] ?? null);
@@ -52,6 +52,10 @@ export default function ChartEditor({ standalone }: { standalone?: boolean }) {
       setSec(0); setSelected(new Set()); hist.current = []; histRedo.current = [];
       setParseWarn('');
       setCurrentFile(file);
+      audioEngine.stop();
+      setPlaying(false);
+      setPlayhead(0);
+      noAudioWarned.current = null;
     } catch (e) {
       setParseWarn(`Could not parse chart (${e instanceof Error ? e.message : e}). Showing empty chart; original file untouched until you save.`);
       setChart(emptyChart('broken', settings.defaultBpm));
@@ -149,12 +153,12 @@ export default function ChartEditor({ standalone }: { standalone?: boolean }) {
     } catch (e) { toast(`Save failed: ${e instanceof Error ? e.message : e}`, 'error'); }
   }
 
-  // playback: scrolling playhead through chart length
+  // playback: scrolling playhead through chart length, synced to song audio clock
   useEffect(() => {
     if (!playing) { if (playTimer.current) window.clearInterval(playTimer.current); playTimer.current = null; return; }
     const t0 = Date.now() - playhead;
     playTimer.current = window.setInterval(() => {
-      const t = Date.now() - t0;
+      const t = audioEngine.playing ? audioEngine.positionMs() : Date.now() - t0;
       setPlayhead(t);
       const len = chartLengthMs(chart);
       if (t > len + 2000) { setPlaying(false); setPlayhead(0); audioEngine.stop(); }
@@ -162,6 +166,64 @@ export default function ChartEditor({ standalone }: { standalone?: boolean }) {
     return () => { if (playTimer.current) window.clearInterval(playTimer.current); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [playing]);
+
+  // stop song audio when leaving the editor
+  useEffect(() => () => { audioEngine.stop(); }, []);
+
+  function songForChart(): SongEntry | null {
+    if (file) {
+      const byFile = songs.find(s => s.chartPaths.includes(file));
+      if (byFile) return byFile;
+    }
+    const name = chart.song.toLowerCase();
+    return songs.find(s => s.name.toLowerCase() === name || s.displayName.toLowerCase() === name) ?? null;
+  }
+
+  const audioCache = useRef<Record<string, { inst: AudioBuffer; voices: AudioBuffer | null }>>({});
+  const noAudioWarned = useRef<string | null>(null);
+
+  async function ensureSongAudio(): Promise<{ inst: AudioBuffer; voices: AudioBuffer | null } | null> {
+    const song = songForChart();
+    if (!song?.instPath) {
+      if (noAudioWarned.current !== file) {
+        noAudioWarned.current = file;
+        toast('No instrumental found for this song — upload one in Song Studio. Previewing silently.', 'error');
+      }
+      return null;
+    }
+    const key = `${song.instPath}|${song.voicesPath ?? ''}`;
+    if (audioCache.current[key]) return audioCache.current[key];
+    try {
+      const load = async (p: string) => {
+        const url = fileUrl(p);
+        if (!url) throw new Error('audio data missing from project');
+        const res = await fetch(url);
+        return audioEngine.decode(await res.blob());
+      };
+      const inst = await load(song.instPath);
+      let voices: AudioBuffer | null = null;
+      if (song.voicesPath) {
+        try { voices = await load(song.voicesPath); }
+        catch { toast('Voices track could not be decoded — playing instrumental only.', 'error'); }
+      }
+      audioCache.current[key] = { inst, voices };
+      return audioCache.current[key];
+    } catch (e) {
+      toast(`Could not decode song audio (${e instanceof Error ? e.message : e}). Previewing silently.`, 'error');
+      return null;
+    }
+  }
+
+  async function togglePlay() {
+    if (playing) { audioEngine.stop(); setPlaying(false); return; }
+    let audio: { inst: AudioBuffer; voices: AudioBuffer | null } | null = null;
+    try { audio = await ensureSongAudio(); } catch { audio = null; }
+    if (audio) {
+      try { await audioEngine.playSong(audio.inst, audio.voices, 0.9, 0.8, playhead); }
+      catch (e) { toast(`Audio playback failed (${e instanceof Error ? e.message : e}). Previewing silently.`, 'error'); }
+    }
+    setPlaying(true);
+  }
 
   useEffect(() => {
     if (metro && playing) audioEngine.startMetronome(chart.bpm);
@@ -179,7 +241,7 @@ export default function ChartEditor({ standalone }: { standalone?: boolean }) {
         placeAtCursor(laneKey);
         return;
       }
-      if (e.code === 'Space') { e.preventDefault(); setPlaying(p => !p); }
+      if (e.code === 'Space') { e.preventDefault(); void togglePlay(); }
       else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && !e.shiftKey) { e.preventDefault(); localUndo(); }
       else if ((e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === 'y' || (e.key.toLowerCase() === 'z' && e.shiftKey))) { e.preventDefault(); localRedo(); }
       else if (e.key === 'Delete' || e.key === 'Backspace') { deleteSelected(); }
@@ -229,7 +291,7 @@ export default function ChartEditor({ standalone }: { standalone?: boolean }) {
         <button className="btn small" onClick={exportSingle}>⬇ Export JSON</button>
         <button className="btn small" onClick={() => { localUndo(); undo(); }} title="Ctrl+Z">↩</button>
         <button className="btn small" onClick={() => { localRedo(); redo(); }} title="Ctrl+Y">↪</button>
-        <button className="btn small" onClick={() => setPlaying(p => !p)}>{playing ? '⏸ Pause (Space)' : '▶ Play (Space)'}</button>
+        <button className="btn small" onClick={() => void togglePlay()}>{playing ? '⏸ Pause (Space)' : '▶ Play (Space)'}</button>
         <label className="pill"><input type="checkbox" checked={metro} onChange={e => setMetro(e.target.checked)} /> Metronome</label>
         <label className="pill">Snap
           <select value={snap} onChange={e => setSnap(Number(e.target.value))} style={{ background: 'transparent', border: 0 }}>
@@ -239,6 +301,7 @@ export default function ChartEditor({ standalone }: { standalone?: boolean }) {
         <label className="pill">Zoom <input type="range" min={0.5} max={3} step={0.1} value={zoom} onChange={e => setZoom(Number(e.target.value))} /></label>
         <label className="pill">Scroll <input type="range" min={0.5} max={2.5} step={0.1} value={scroll} onChange={e => setScroll(Number(e.target.value))} /></label>
         <span className="tag">Sec {sec + 1}/{chart.sections.length} · {formatTime(secStart)} · {chart.bpm} BPM</span>
+        <span className="tag" title={songForChart()?.instPath ?? 'No instrumental in project'}>{songForChart()?.instPath ? '🔊 song audio' : '🔇 no instrumental'}</span>
       </div>
       {parseWarn && <div className="panel" style={{ borderColor: 'var(--warn)' }}><span className="err">{parseWarn}</span></div>}
 

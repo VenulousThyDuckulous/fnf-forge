@@ -1,9 +1,20 @@
 // WebAudio engine: playback of project audio blobs, metronome, waveform peaks.
 
+export interface LayerSpec {
+  buffer: AudioBuffer;
+  volume: number;
+  loop: boolean;
+  /** seconds into the buffer to begin (before the shared offset) */
+  startAt: number;
+  /** seconds to play; 0 = to end of buffer */
+  dur: number;
+}
+
+interface LayerJob { node: { src: AudioBufferSourceNode; gain: GainNode }; durMs: number; }
+
 export class AudioEngine {
   ctx: AudioContext | null = null;
-  private src: AudioBufferSourceNode | null = null;
-  private gain: GainNode | null = null;
+  private nodes: { src: AudioBufferSourceNode; gain: GainNode }[] = [];
   startedAt = 0;
   offsetMs = 0;
   playing = false;
@@ -28,36 +39,68 @@ export class AudioEngine {
   }
 
   async playBuffer(buffer: AudioBuffer, volume = 1, loop = false, trimStartMs = 0, trimEndMs = 0): Promise<void> {
+    const startSec = Math.max(0, trimStartMs / 1000);
+    const dur = trimEndMs > trimStartMs ? (trimEndMs - trimStartMs) / 1000 : buffer.duration - startSec;
+    // NOTE: offsetMs carries the trim; spec.startAt stays 0 so playLayers doesn't add it twice.
+    await this.playLayers([{ buffer, volume, loop, startAt: 0, dur }], trimStartMs);
+  }
+
+  /** Play instrumental + optional voices in sync (chart preview). */
+  async playSong(inst: AudioBuffer, voices: AudioBuffer | null, vol = 0.9, voicesVol = 0.8, offsetMs = 0): Promise<void> {
+    const layers: LayerSpec[] = [{ buffer: inst, volume: vol, loop: false, startAt: 0, dur: 0 }];
+    if (voices) layers.push({ buffer: voices, volume: voicesVol, loop: false, startAt: 0, dur: 0 });
+    await this.playLayers(layers, Math.max(0, offsetMs));
+  }
+
+  private async playLayers(specs: LayerSpec[], offsetMs: number): Promise<void> {
     const ctx = this.ensure();
     this.stop();
-    this.src = ctx.createBufferSource();
-    this.src.buffer = buffer;
-    this.src.loop = loop;
-    this.gain = ctx.createGain();
-    this.gain.gain.value = volume;
-    this.src.connect(this.gain).connect(ctx.destination);
-    const startAt = Math.max(0, trimStartMs / 1000);
-    const dur = trimEndMs > trimStartMs ? (trimEndMs - trimStartMs) / 1000 : buffer.duration - startAt;
-    this.durationMs = Math.max(0, dur * 1000);
+    this.offsetMs = offsetMs;
+    this.volume = specs[0]?.volume ?? 1;
+    const jobs: LayerJob[] = [];
+    for (const s of specs) {
+      const startAt = (s.startAt || 0) + offsetMs / 1000;
+      const src = ctx.createBufferSource();
+      src.buffer = s.buffer;
+      src.loop = s.loop;
+      const gain = ctx.createGain();
+      gain.gain.value = s.volume;
+      src.connect(gain).connect(ctx.destination);
+      const playDur = s.dur > 0 ? s.dur : Math.max(0, s.buffer.duration - startAt);
+      const node = { src, gain };
+      this.nodes.push(node);
+      jobs.push({ node, durMs: Math.max(0, playDur * 1000) });
+      try {
+        if (startAt >= s.buffer.duration) continue; // offset past the end: skip layer
+        src.start(0, Math.min(startAt, s.buffer.duration - 0.01), Math.max(0.05, playDur));
+      } catch {
+        // browser refused to start this layer; drop it
+        this.nodes = this.nodes.filter(n => n !== node);
+      }
+    }
+    if (this.nodes.length === 0) throw new Error('No audio could be started (offset may be past the end).');
+    this.durationMs = Math.max(...jobs.filter(j => this.nodes.includes(j.node)).map(j => j.durMs), 0);
     this.startedAt = ctx.currentTime;
-    this.offsetMs = trimStartMs;
     this.playing = true;
-    this.volume = volume;
-    this.src.onended = () => { if (this.playing && !loop) { this.playing = false; } };
-    this.src.start(0, startAt, Math.max(0.05, dur));
+    const main = this.nodes[0].src;
+    main.onended = () => { this.playing = false; };
   }
 
   stop(): void {
-    try { this.src?.stop(); } catch { /* already stopped */ }
-    try { this.src?.disconnect(); } catch { /* ignore */ }
-    this.src = null;
+    for (const n of this.nodes) {
+      try { n.src.onended = null; n.src.stop(); } catch { /* already stopped */ }
+      try { n.src.disconnect(); n.gain.disconnect(); } catch { /* ignore */ }
+    }
+    this.nodes = [];
     this.playing = false;
     this.stopMetronome();
   }
 
   setVolume(v: number): void {
     this.volume = v;
-    if (this.gain && this.ctx) this.gain.gain.setTargetAtTime(v, this.ctx.currentTime, 0.02);
+    if (!this.ctx) return;
+    const t = this.ctx.currentTime;
+    for (const n of this.nodes) n.gain.gain.setTargetAtTime(v, t, 0.02);
   }
 
   positionMs(): number {
