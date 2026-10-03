@@ -19,12 +19,13 @@ export default function ChartEditor({ standalone }: { standalone?: boolean }) {
   const [chart, setChart] = useState<PsychChart>(() => emptyChart('tutorial', settings.defaultBpm));
   const [parseWarn, setParseWarn] = useState('');
   const [sec, setSec] = useState(0);
-  const [snap, setSnap] = useState(4); // subdivisions selector: 1,2,4,8,16 steps
+  const [snap, setSnap] = useState(4); // grid subdivisions per beat (1=quarters … 16=64ths)
   const [zoom, setZoom] = useState(1);
   const [scroll, setScroll] = useState(settings.defaultScroll);
   const [playing, setPlaying] = useState(false);
   const [metro, setMetro] = useState(false);
   const [playhead, setPlayhead] = useState(0);
+  const [cursorMs, setCursorMs] = useState<number | null>(null); // keyboard placement cursor (absolute ms)
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [dragNote, setDragNote] = useState<{ key: string; dx: number; dy: number } | null>(null);
   const [aiPrompt, setAiPrompt] = useState('Make the next 8 measures harder.');
@@ -59,6 +60,15 @@ export default function ChartEditor({ standalone }: { standalone?: boolean }) {
 
   const section = chart.sections[clamp(sec, 0, chart.sections.length - 1)];
   const secStart = sectionStartMs(chart, clamp(sec, 0, chart.sections.length - 1));
+
+  // keep the keyboard cursor inside the visible section
+  useEffect(() => {
+    if (!section) return;
+    const bpm = section.changeBPM && section.bpm ? section.bpm : chart.bpm;
+    const secEnd = secStart + section.lengthInSteps * stepLengthMs(bpm);
+    setCursorMs(prev => (prev === null || prev < secStart || prev > secEnd) ? Math.round(secStart) : prev);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sec, file]);
   const pxPerMs = 0.25 * zoom * scroll;
   const gridH = Math.max(320, (section ? section.lengthInSteps * stepLengthMs(section.changeBPM && section.bpm ? section.bpm : chart.bpm) : 1000) * pxPerMs);
 
@@ -74,10 +84,7 @@ export default function ChartEditor({ standalone }: { standalone?: boolean }) {
   function noteKey(n: PsychNote) { return `${n.time}:${n.lane}`; }
 
   function quantize(timeMs: number): number {
-    const bpm = section?.changeBPM && section?.bpm ? section.bpm : chart.bpm;
-    const step = stepLengthMs(bpm) * (16 / Math.max(1, snap * 4));
-    const rel = timeMs - secStart;
-    return secStart + Math.round(rel / step) * step;
+    return quantizeInSection(chart, clamp(sec, 0, chart.sections.length - 1), timeMs);
   }
 
   function addNoteAt(lane: number, yMs: number) {
@@ -85,6 +92,46 @@ export default function ChartEditor({ standalone }: { standalone?: boolean }) {
     const t = Math.max(0, Math.round(quantize(yMs)));
     const next = { ...chart, sections: chart.sections.map((s, i) => i === sec ? { ...s, notes: [...s.notes, { time: t, lane, sustain: 0 }] } : s) };
     commit(next);
+    setCursorMs(t);
+  }
+
+  /** Keyboard note entry: drops a note in `lane` at the live playhead while
+   * playing, otherwise at the cursor (click the grid to move the cursor). */
+  function placeAtCursor(lane: number) {
+    if (!section) return;
+    let t: number;
+    if (playing) {
+      t = playhead;
+      // jump to whichever section contains the playhead
+      let acc = 0;
+      for (let i = 0; i < chart.sections.length; i++) {
+        const s = chart.sections[i];
+        const bpm = s.changeBPM && s.bpm ? s.bpm : chart.bpm;
+        const dur = s.lengthInSteps * stepLengthMs(bpm);
+        if (t < acc + dur) {
+          if (i !== sec) { setSec(i); setCursorMs(Math.round(t)); }
+          const q = quantizeInSection(chart, i, t);
+          commit({ ...chart, sections: chart.sections.map((x, j) => j === i ? { ...x, notes: [...x.notes, { time: Math.max(0, Math.round(q)), lane, sustain: 0 }] } : x) });
+          return;
+        }
+        acc += dur;
+      }
+      return; // past the end — ignore
+    }
+    t = cursorMs ?? secStart;
+    // clamp cursor into current section
+    const bpm = section.changeBPM && section.bpm ? section.bpm : chart.bpm;
+    const secEnd = secStart + section.lengthInSteps * stepLengthMs(bpm);
+    t = clamp(t, secStart, secEnd);
+    addNoteAt(lane, t);
+  }
+
+  function quantizeInSection(c: PsychChart, sectionIdx: number, timeMs: number): number {
+    const s = c.sections[sectionIdx];
+    const bpm = s.changeBPM && s.bpm ? s.bpm : c.bpm;
+    const step = stepLengthMs(bpm) * (16 / Math.max(1, snap * 4));
+    const start = sectionStartMs(c, sectionIdx);
+    return start + Math.round((timeMs - start) / step) * step;
   }
 
   function deleteSelected() {
@@ -126,6 +173,12 @@ export default function ChartEditor({ standalone }: { standalone?: boolean }) {
     const h = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+      const laneKey = LANE_KEYS[e.key.toLowerCase()];
+      if (laneKey !== undefined && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        e.preventDefault();
+        placeAtCursor(laneKey);
+        return;
+      }
       if (e.code === 'Space') { e.preventDefault(); setPlaying(p => !p); }
       else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && !e.shiftKey) { e.preventDefault(); localUndo(); }
       else if ((e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === 'y' || (e.key.toLowerCase() === 'z' && e.shiftKey))) { e.preventDefault(); localRedo(); }
@@ -136,7 +189,7 @@ export default function ChartEditor({ standalone }: { standalone?: boolean }) {
     window.addEventListener('keydown', h);
     return () => window.removeEventListener('keydown', h);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [chart, selected, sec]);
+  }, [chart, selected, sec, playing, playhead, cursorMs, snap]);
 
   async function runAi(insert: boolean) {
     setAiBusy(true);
@@ -256,6 +309,8 @@ export default function ChartEditor({ standalone }: { standalone?: boolean }) {
             })}
             {/* playhead */}
             {playing && <div style={{ position: 'absolute', left: 0, right: 0, top: (playhead - secStart) * pxPerMs, borderTop: '2px solid var(--err)', pointerEvents: 'none' }} />}
+            {/* keyboard cursor (paused) */}
+            {!playing && cursorMs !== null && <div title="Keyboard cursor — D/F/J/K or arrows drop a note here" style={{ position: 'absolute', left: 0, right: 0, top: (cursorMs - secStart) * pxPerMs, borderTop: '2px dashed var(--acc2)', pointerEvents: 'none' }} />}
           </div>
         </div>
 
@@ -290,7 +345,7 @@ export default function ChartEditor({ standalone }: { standalone?: boolean }) {
                 commit({ ...chart, sections: chart.sections.map((x, i) => i === sec ? { ...s, notes: s.notes.map(n => selected.has(noteKey(n)) ? { ...n, sustain: (n.sustain || 0) + 125 } : n) } : x) });
               }}>+ Sustain</button>
             </div>
-            <p className="mut">Click grid to place · click note to select · drag to move lanes · right-click deletes. Keys: <span className="kbd">D F J K</span> lanes (with Enter?) — lane keys place at playhead.</p>
+            <p className="mut">Click grid to place + move cursor · <span className="kbd">D F J K</span>/<span className="kbd">←↓↑→</span> drop notes at cursor (or playhead while playing) · click note to select · drag to move lanes · right-click deletes.</p>
           </div>
 
           <div className="panel">

@@ -12,6 +12,25 @@ export default function SongStudio() {
   const [buf, setBuf] = useState<AudioBuffer | null>(null);
   const [peaks, setPeaks] = useState<number[]>([]);
   const [playing, setPlaying] = useState(false);
+  const stopTimer = useRef<number | null>(null);
+
+  useEffect(() => () => {
+    audioEngine.stop();
+    if (stopTimer.current) window.clearTimeout(stopTimer.current);
+  }, []);
+
+  function togglePlay() {
+    if (!buf) return;
+    if (stopTimer.current) { window.clearTimeout(stopTimer.current); stopTimer.current = null; }
+    if (playing) { audioEngine.stop(); setPlaying(false); return; }
+    audioEngine.setVolume(form.vol);
+    void audioEngine.playBuffer(buf, form.vol)
+      .then(() => {
+        setPlaying(true);
+        stopTimer.current = window.setTimeout(() => setPlaying(false), Math.max(100, buf.duration * 1000));
+      })
+      .catch(e => toast(`Playback failed: ${e instanceof Error ? e.message : e}`, 'error'));
+  }
   const waveRef = useRef<HTMLCanvasElement>(null);
 
   const song = songs.find(s => s.id === sel) ?? null;
@@ -119,11 +138,7 @@ export default function SongStudio() {
               <canvas ref={waveRef} className="wave" />
               <div className="row" style={{ marginTop: 8 }}>
                 <button className="btn small" disabled={!song.instPath} onClick={() => song.instPath && void loadPreview(song.instPath)}>Load Inst waveform</button>
-                <button className="btn small" disabled={!buf} onClick={() => {
-                  if (!buf) return;
-                  if (playing) { audioEngine.stop(); setPlaying(false); }
-                  else { void audioEngine.playBuffer(buf, form.vol).then(() => setPlaying(true)); audioEngine['src'] && (audioEngine as unknown as { src: { onended: () => void } }).src && setPlaying(true); setTimeout(() => setPlaying(false), buf.duration * 1000); }
-                }}>{playing ? '⏹ Stop' : '▶ Play instrumental'}</button>
+                <button className="btn small" disabled={!buf} onClick={togglePlay}>{playing ? '⏹ Stop' : '▶ Play instrumental'}</button>
                 <div className="field" style={{ margin: 0 }}><label>Volume {Math.round(form.vol * 100)}%</label>
                   <input type="range" min={0} max={1} step={0.01} value={form.vol} onChange={e => { setForm({ ...form, vol: Number(e.target.value) }); audioEngine.setVolume(Number(e.target.value)); }} /></div>
               </div>

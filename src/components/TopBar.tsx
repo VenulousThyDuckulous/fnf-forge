@@ -6,7 +6,7 @@ import { downloadBlob } from '../utils/helpers';
 export default function TopBar() {
   const { project, renameProject, saveNow, undo, redo, canUndo, canRedo, setView, setCurrentFile, toast, replaceAllFiles, saveStatus } = useStore();
   const zipRef = useRef<HTMLInputElement>(null);
-  const folderRef = useRef<HTMLInputElement>(null);
+  const folderRef = useRef<HTMLInputElement | null>(null);
   const [previewOpen, setPreviewOpen] = useState(false);
 
   async function onZip(e: React.ChangeEvent<HTMLInputElement>) {
@@ -55,7 +55,9 @@ export default function TopBar() {
       <button className="btn small primary" onClick={() => void onExport()} title="Export full mod ZIP">📦 Export Mod</button>
       <button className="btn small" onClick={() => setPreviewOpen(true)} title="Preview project summary">👁 Preview</button>
       <input ref={zipRef} type="file" accept=".zip" className="hidden-input" onChange={onZip} />
-      <input ref={folderRef} type="file" className="hidden-input" multiple onChange={onFolder} {...{ webkitdirectory: '', directory: '' } as Record<string, string>} />
+      <input
+        ref={el => { folderRef.current = el; if (el) el.setAttribute('webkitdirectory', ''); }}
+        type="file" className="hidden-input" multiple onChange={onFolder} />
       {previewOpen && (
         <div className="modal-ov" onClick={() => setPreviewOpen(false)}>
           <div className="modal" onClick={e => e.stopPropagation()}>
