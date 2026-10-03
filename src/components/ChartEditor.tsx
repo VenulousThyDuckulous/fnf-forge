@@ -268,13 +268,13 @@ export default function ChartEditor({ standalone }: { standalone?: boolean }) {
               return <div key={i} style={{ position: 'absolute', left: 0, right: 0, top: y, borderTop: `1px ${strong ? 'solid' : 'dashed'} ${strong ? 'var(--border2)' : 'var(--border)'}`, pointerEvents: 'none' }} />;
             })}
             {/* notes */}
-            {section?.notes.map(n => {
+            {section?.notes.map((n, idx) => {
               const y = (n.time - secStart) * pxPerMs;
               if (y < -40 || y > gridH + 40) return null;
               const k = noteKey(n);
               const sel2 = selected.has(k);
               return (
-                <div key={k} data-note="1"
+                <div key={`${k}:${idx}`} data-note="1"
                   title={`${formatTime(n.time)} lane ${n.lane}${n.sustain ? ` sustain ${Math.round(n.sustain)}ms` : ''} — drag to move, right-click to delete`}
                   onMouseDown={e => { e.stopPropagation(); setDragNote({ key: k, dx: e.clientX, dy: e.clientY }); }}
                   onMouseUp={() => setDragNote(null)}
@@ -303,9 +303,9 @@ export default function ChartEditor({ standalone }: { standalone?: boolean }) {
               );
             })}
             {/* sustains */}
-            {section?.notes.filter(n => n.sustain > 0).map(n => {
+            {section?.notes.filter(n => n.sustain > 0).map((n, idx) => {
               const y = (n.time - secStart) * pxPerMs;
-              return <div key={'s' + noteKey(n)} style={{ position: 'absolute', left: `calc(${(n.lane % 4) * 25}% + 14px)`, top: y + 18, width: 8, height: Math.max(4, n.sustain * pxPerMs), background: laneColors[n.lane % 4], opacity: 0.55, borderRadius: 4, pointerEvents: 'none' }} />;
+              return <div key={`s${noteKey(n)}:${idx}`} style={{ position: 'absolute', left: `calc(${(n.lane % 4) * 25}% + 14px)`, top: y + 18, width: 8, height: Math.max(4, n.sustain * pxPerMs), background: laneColors[n.lane % 4], opacity: 0.55, borderRadius: 4, pointerEvents: 'none' }} />;
             })}
             {/* playhead */}
             {playing && <div style={{ position: 'absolute', left: 0, right: 0, top: (playhead - secStart) * pxPerMs, borderTop: '2px solid var(--err)', pointerEvents: 'none' }} />}
